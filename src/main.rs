@@ -39,8 +39,49 @@ async fn main() {
         eprintln!("Not using TLS");
     }
 
-    if let Err(err) = burley::server::run_server(cli).await {
-        eprintln!("Server error: {err}");
-        std::process::exit(1);
+    tokio::select! {
+        Ok(()) = tokio::signal::ctrl_c() => {
+            // Return
+        }
+        Some(()) = async move {
+            let sigterm = tokio::signal::unix::SignalKind::terminate();
+            #[allow(clippy::unwrap_used)]
+            tokio::signal::unix::signal(sigterm).unwrap().recv().await
+        } => {
+            // Return
+        }
+        Some(()) = async move {
+            let sigterm = tokio::signal::unix::SignalKind::alarm();
+            #[allow(clippy::unwrap_used)]
+            tokio::signal::unix::signal(sigterm).unwrap().recv().await
+        } => {
+            // Return
+        }
+        Some(()) = async move {
+            let sigterm = tokio::signal::unix::SignalKind::hangup();
+            #[allow(clippy::unwrap_used)]
+            tokio::signal::unix::signal(sigterm).unwrap().recv().await
+        } => {
+            // Return
+        }
+        Some(()) = async move {
+            let sigterm = tokio::signal::unix::SignalKind::user_defined1();
+            #[allow(clippy::unwrap_used)]
+            tokio::signal::unix::signal(sigterm).unwrap().recv().await
+        } => {
+            // Return
+        }
+        Some(()) = async move {
+            let sigterm = tokio::signal::unix::SignalKind::user_defined2();
+            #[allow(clippy::unwrap_used)]
+            tokio::signal::unix::signal(sigterm).unwrap().recv().await
+        } => {
+            // Return
+        }
+
+        Err(err) = burley::server::run_server(cli)  => {
+            eprintln!("Server error: {err}");
+            std::process::exit(1);
+        }
     }
 }

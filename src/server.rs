@@ -6,7 +6,7 @@ use rama::{
     Context, Layer, Service,
     error::{ErrorContext, OpaqueError},
     http::{
-        Body, HeaderMap, Method, Request, Response, StatusCode, Version,
+        Body, HeaderMap, Method, Request, Response, StatusCode, Uri,
         client::EasyHttpWebClient,
         dep::http_body_util::BodyExt,
         header::{self, HeaderName, HeaderValue},
@@ -35,8 +35,10 @@ use rama::{
         server::{TlsAcceptorData, TlsAcceptorDataBuilder, TlsAcceptorLayer},
     },
 };
+use serde_with::{DisplayFromStr, serde_as};
 use std::{convert::Infallible, io::BufReader, path::Path, sync::Arc, time::Duration};
 use tempfile::tempdir;
+use tracing::{debug, error, info};
 
 const BODY_LIMIT: usize = 2 * 1024 * 1024;
 const CACHE_HEADER: &str = "x-burley-cache";
@@ -48,13 +50,17 @@ struct ProxyState {
 
 type ProxyContext = Context<ProxyState>;
 
-#[derive(Debug)]
+#[serde_as]
+#[derive(Debug, serde::Serialize)]
 struct RequestLogFields {
+    #[serde_as(as = "DisplayFromStr")]
     method: Method,
     client_ip: String,
-    url: String,
+    http_host: String,
+    #[serde_as(as = "DisplayFromStr")]
+    url: Uri,
     response_bytes: usize,
-    http_version: Version,
+    http_version: String,
 }
 
 pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
@@ -110,7 +116,7 @@ pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
             )
                 .into_layer(service_fn(http_plain_proxy)),
         );
-        tracing::info!(addr = %http_addr, "starting HTTP proxy listener");
+        info!(addr = %http_addr, "starting HTTP proxy listener");
         http_listener
             .serve_graceful(
                 guard,
@@ -135,7 +141,7 @@ pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
                 )
                     .into_layer(service_fn(http_plain_proxy)),
             );
-            tracing::info!(addr = %https_addr, "starting HTTPS proxy listener");
+            info!(addr = %https_addr, "starting HTTPS proxy listener");
             https_listener
                 .serve_graceful(
                     guard,
@@ -162,9 +168,9 @@ async fn http_connect_accept(
     req: Request,
 ) -> Result<(Response, ProxyContext, Request), Response> {
     match ctx.get_or_try_insert_with_ctx::<RequestContext, _>(|ctx| (ctx, &req).try_into()) {
-        Ok(request_ctx) => tracing::info!("accept CONNECT to {}", request_ctx.authority),
+        Ok(request_ctx) => debug!("accept CONNECT to {}", request_ctx.authority),
         Err(err) => {
-            tracing::error!(err = %err, "error extracting CONNECT authority");
+            error!(err = %err, "error extracting CONNECT authority");
             return Err(StatusCode::BAD_REQUEST.into_response());
         }
     }
@@ -176,16 +182,16 @@ async fn http_connect_accept(
 
 async fn http_connect_proxy(ctx: ProxyContext, mut upgraded: Upgraded) -> Result<(), Infallible> {
     let Some(request_ctx) = ctx.get::<RequestContext>() else {
-        tracing::error!("CONNECT request context missing");
+        error!("CONNECT request context missing");
         return Ok(());
     };
 
     let authority = request_ctx.authority.clone();
-    tracing::info!("CONNECT to {authority}");
+    debug!("CONNECT to {authority}");
     let (mut stream, _) = match default_tcp_connect(&ctx, authority).await {
         Ok(stream) => stream,
         Err(err) => {
-            tracing::error!(error = %err, "error connecting to CONNECT host");
+            error!(error = %err, "error connecting to CONNECT host");
             return Ok(());
         }
     };
@@ -193,7 +199,7 @@ async fn http_connect_proxy(ctx: ProxyContext, mut upgraded: Upgraded) -> Result
     if let Err(err) = tokio::io::copy_bidirectional(&mut upgraded, &mut stream).await
         && !is_connection_error(&err)
     {
-        tracing::error!(error = %err, "error copying CONNECT tunnel data");
+        error!(error = %err, "error copying CONNECT tunnel data");
     }
 
     Ok(())
@@ -208,7 +214,7 @@ async fn http_plain_proxy(ctx: ProxyContext, req: Request) -> Result<Response, I
         && let Some(entry) = ctx.state().datastore.get(&cache_key)
     {
         let response_bytes = entry.content.len();
-        tracing::debug!(uri = %cache_key, "cache hit");
+        debug!(uri = %cache_key, "cache hit");
         log_request_fields(RequestLogFields {
             response_bytes,
             ..request_log
@@ -220,7 +226,7 @@ async fn http_plain_proxy(ctx: ProxyContext, req: Request) -> Result<Response, I
     match client.serve(ctx.clone(), req).await {
         Ok(resp) => cache_and_tag_response(ctx, method, cache_key, request_log, resp).await,
         Err(err) => {
-            tracing::error!(error = %err, "error in upstream request");
+            error!(error = %err, "error in upstream request");
             log_request_fields(request_log);
             Ok(empty_response(StatusCode::INTERNAL_SERVER_ERROR))
         }
@@ -238,7 +244,7 @@ async fn cache_and_tag_response(
     let body_bytes = match body.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(err) => {
-            tracing::error!(error = %err, "error collecting upstream response body");
+            error!(error = %err, "error collecting upstream response body");
             return Ok(empty_response(StatusCode::INTERNAL_SERVER_ERROR));
         }
     };
@@ -282,21 +288,15 @@ fn request_log_fields(
             .get::<SocketInfo>()
             .map(|socket| socket.peer_addr().ip().to_string())
             .unwrap_or_else(|| "-".to_owned()),
-        url: req.uri().to_string(),
+        http_host: req.uri().host().unwrap_or("-").to_owned(),
+        url: req.uri().clone(),
         response_bytes,
-        http_version: req.version(),
+        http_version: format!("{:?}", req.version()),
     }
 }
 
 fn log_request_fields(fields: RequestLogFields) {
-    tracing::info!(
-        method = %fields.method,
-        client_ip = %fields.client_ip,
-        url = %fields.url,
-        response_bytes = fields.response_bytes,
-        http_version = ?fields.http_version,
-        "request complete"
-    );
+    info!("{}", serde_json::json!(fields));
 }
 
 fn response_from_cache(entry: CacheEntry) -> Response {
@@ -325,7 +325,7 @@ fn empty_response(status: StatusCode) -> Response {
     match Response::builder().status(status).body(Body::empty()) {
         Ok(response) => response,
         Err(err) => {
-            tracing::error!(error = %err, "error building empty response");
+            error!(error = %err, "error building empty response");
             Response::new(Body::empty())
         }
     }
@@ -468,7 +468,10 @@ mod tests {
         assert_eq!(log.client_ip, "203.0.113.7");
         assert_eq!(log.url, "https://example.test/upload?part=1");
         assert_eq!(log.response_bytes, 512);
-        assert_eq!(log.http_version, rama::http::Version::HTTP_2);
+        assert_eq!(
+            log.http_version,
+            format!("{:?}", rama::http::Version::HTTP_2)
+        );
     }
 
     async fn start_echo_tcp_upstream() -> SocketAddr {
