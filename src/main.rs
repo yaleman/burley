@@ -1,16 +1,27 @@
-use burley::DataStore;
 use clap::Parser;
-use tempfile::tempdir;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    let env_filter = match EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(_) => EnvFilter::new("info"),
+    };
+    if let Err(err) = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init()
+    {
+        eprintln!("Failed to initialize logging: {err}");
+        std::process::exit(1);
+    }
+
     let cli = burley::cli::Cli::parse();
 
     eprintln!(
         "Starting Burley on HTTP port {} and HTTPS port {}",
         cli.http_port, cli.https_port
     );
-    if let (Some(tls_cert), Some(tls_key)) = (cli.tls_cert, cli.tls_key) {
+    if let (Some(tls_cert), Some(tls_key)) = (&cli.tls_cert, &cli.tls_key) {
         if !tls_cert.exists() {
             eprintln!("TLS cert file {} does not exist", tls_cert.display());
             std::process::exit(1);
@@ -28,10 +39,8 @@ async fn main() {
         eprintln!("Not using TLS");
     }
 
-    let Ok(store_dir) = tempdir() else {
-        eprintln!("Failed to create temporary directory for data store");
+    if let Err(err) = burley::server::run_server(cli).await {
+        eprintln!("Server error: {err}");
         std::process::exit(1);
-    };
-
-    let mut datastore = DataStore::new(1024 * 1024 * 1024, store_dir.path().to_path_buf());
+    }
 }
