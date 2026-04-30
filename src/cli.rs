@@ -12,4 +12,7 @@ pub struct Cli {
     pub tls_cert: Option<PathBuf>,
     #[clap(long, env = "BURLEY_TLS_KEY")]
     pub tls_key: Option<PathBuf>,
+
+    #[clap(short, long, env = "BURLEY_DEBUG")]
+    pub debug: bool,
 }

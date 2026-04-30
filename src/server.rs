@@ -36,11 +36,12 @@ use rama::{
     },
 };
 use serde_with::{DisplayFromStr, serde_as};
-use std::{convert::Infallible, io::BufReader, path::Path, sync::Arc, time::Duration};
+use std::{convert::Infallible, io::BufReader, path::Path, sync::Arc};
 use tempfile::tempdir;
 use tracing::{debug, error, info};
 
-const BODY_LIMIT: usize = 2 * 1024 * 1024;
+const BODY_LIMIT: usize = 1024 * 1024 * 1024;
+const CACHE_MAX_SIZE: usize = 1024 * 1024 * 20;
 const CACHE_HEADER: &str = "x-burley-cache";
 
 #[derive(Clone)]
@@ -77,7 +78,7 @@ pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
     let store_dir = tempdir()?;
     let state = ProxyState {
         datastore: Arc::new(DataStore::new(
-            1024 * 1024 * 1024,
+            CACHE_MAX_SIZE as u64,
             store_dir.path().to_path_buf(),
         )),
     };
@@ -99,10 +100,35 @@ pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
         None
     };
 
-    let graceful = rama::graceful::Shutdown::default();
+    // let graceful = rama::graceful::Shutdown::default();
 
-    graceful.spawn_task_fn(async move |guard| {
-        let exec = Executor::graceful(guard.clone());
+    let exec = Executor::new();
+
+    // graceful.spawn_task_fn(async move |guard| {
+    //     let exec = Executor::graceful(guard.clone());
+    let http_service = HttpServer::auto(exec).service(
+        (
+            TraceLayer::new_for_http(),
+            UpgradeLayer::new(
+                MethodMatcher::CONNECT,
+                service_fn(http_connect_accept),
+                service_fn(http_connect_proxy),
+            ),
+            RemoveResponseHeaderLayer::hop_by_hop(),
+            RemoveRequestHeaderLayer::hop_by_hop(),
+        )
+            .into_layer(service_fn(http_plain_proxy)),
+    );
+    info!(addr = %http_addr, "starting HTTP proxy listener");
+    http_listener
+        .serve(BodyLimitLayer::symmetric(BODY_LIMIT).into_layer(http_service))
+        .await;
+    // });
+
+    if let (Some((https_listener, https_addr)), Some(tls_config)) = (https_listener, tls_config) {
+        //     graceful.spawn_task_fn(async move |guard| {
+        let exec = Executor::new();
+        //         let exec = Executor::graceful(guard.clone());
         let http_service = HttpServer::auto(exec).service(
             (
                 TraceLayer::new_for_http(),
@@ -116,49 +142,24 @@ pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
             )
                 .into_layer(service_fn(http_plain_proxy)),
         );
-        info!(addr = %http_addr, "starting HTTP proxy listener");
-        http_listener
-            .serve_graceful(
-                guard,
-                BodyLimitLayer::symmetric(BODY_LIMIT).into_layer(http_service),
+        info!(addr = %https_addr, "starting HTTPS proxy listener");
+        https_listener
+            .serve(
+                // guard,
+                (
+                    BodyLimitLayer::symmetric(BODY_LIMIT),
+                    TlsAcceptorLayer::new(tls_config).with_store_client_hello(true),
+                )
+                    .into_layer(http_service),
             )
             .await;
-    });
-
-    if let (Some((https_listener, https_addr)), Some(tls_config)) = (https_listener, tls_config) {
-        graceful.spawn_task_fn(async move |guard| {
-            let exec = Executor::graceful(guard.clone());
-            let http_service = HttpServer::auto(exec).service(
-                (
-                    TraceLayer::new_for_http(),
-                    UpgradeLayer::new(
-                        MethodMatcher::CONNECT,
-                        service_fn(http_connect_accept),
-                        service_fn(http_connect_proxy),
-                    ),
-                    RemoveResponseHeaderLayer::hop_by_hop(),
-                    RemoveRequestHeaderLayer::hop_by_hop(),
-                )
-                    .into_layer(service_fn(http_plain_proxy)),
-            );
-            info!(addr = %https_addr, "starting HTTPS proxy listener");
-            https_listener
-                .serve_graceful(
-                    guard,
-                    (
-                        BodyLimitLayer::symmetric(BODY_LIMIT),
-                        TlsAcceptorLayer::new(tls_config).with_store_client_hello(true),
-                    )
-                        .into_layer(http_service),
-                )
-                .await;
-        });
+        // });
     }
 
-    graceful
-        .shutdown_with_limit(Duration::from_secs(30))
-        .await
-        .map_err(|err| BurleyError::Other(err.to_string()))?;
+    // graceful
+    //     .shutdown_with_limit(Duration::from_secs(30))
+    //     .await
+    //     .map_err(|err| BurleyError::Other(err.to_string()))?;
 
     Ok(())
 }

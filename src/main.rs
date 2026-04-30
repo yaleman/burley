@@ -4,19 +4,20 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    let cli = burley::cli::Cli::parse();
+
     let env_filter = match EnvFilter::try_from_default_env() {
         Ok(filter) => filter,
         Err(_) => EnvFilter::new("info"),
     };
     if let Err(err) = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
+        .with_target(cli.debug)
         .try_init()
     {
         eprintln!("Failed to initialize logging: {err}");
         std::process::exit(1);
     }
-
-    let cli = burley::cli::Cli::parse();
 
     info!(
         "Starting Burley on HTTP port {} and HTTPS port {}",
