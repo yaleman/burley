@@ -23,3 +23,12 @@ pub fn init_logging(cli: &crate::cli::Cli) -> Result<(), ExitCode> {
     }
     Ok(())
 }
+
+#[test]
+fn test_logging() {
+    let mut cli = crate::cli::Cli::default();
+    assert!(init_logging(&cli).is_ok());
+
+    cli.debug = true;
+    assert!(init_logging(&cli).is_err());
+}

@@ -1,0 +1,5 @@
+[test_config]
+exclude-files = ["src/main.rs"]
+
+[report]
+out = ["Html"]

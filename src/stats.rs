@@ -41,3 +41,8 @@ pub fn init_meters(provider: &opentelemetry_sdk::metrics::SdkMeterProvider) -> S
             .build(),
     }
 }
+
+#[tokio::test]
+async fn test_init() {
+    init_meters(&init());
+}

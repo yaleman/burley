@@ -11,3 +11,8 @@ run = "cargo clippy --all -- -D warnings"
 [tasks.test]
 depends = ["fmt"]
 run = "cargo test --all"
+
+[tasks.coverage]
+run = [
+    "cargo tarpaulin"
+]

@@ -19,3 +19,16 @@ pub struct Cli {
     #[clap(long, short, help = "Tokio console mode")]
     pub tokio_console: bool,
 }
+
+impl Default for Cli {
+    fn default() -> Self {
+        Self {
+            http_port: NonZeroU16::try_from(3128).expect("This should never fail"),
+            https_port: NonZeroU16::try_from(3129).expect("This should never fail"),
+            tls_cert: Default::default(),
+            tls_key: Default::default(),
+            debug: Default::default(),
+            tokio_console: Default::default(),
+        }
+    }
+}
