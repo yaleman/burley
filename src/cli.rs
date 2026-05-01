@@ -23,7 +23,9 @@ pub struct Cli {
 impl Default for Cli {
     fn default() -> Self {
         Self {
+            #[allow(clippy::expect_used)]
             http_port: NonZeroU16::try_from(3128).expect("This should never fail"),
+            #[allow(clippy::expect_used)]
             https_port: NonZeroU16::try_from(3129).expect("This should never fail"),
             tls_cert: Default::default(),
             tls_key: Default::default(),

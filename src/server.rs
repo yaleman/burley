@@ -90,7 +90,7 @@ pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
     let state = ProxyState {
         datastore: Arc::new(
             DataStore::new(CACHE_MAX_SIZE as u64, store_dir.path().to_path_buf())
-                .with_metrics(metrics_provider.clone()),
+                .with_metrics(&metrics_provider),
         ),
     };
 
@@ -218,7 +218,7 @@ async fn http_connect_accept(
         }
     }
 
-    log_request_fields(&ctx, request_log_fields(&ctx, &req, 0, false));
+    log_request_fields(&ctx, &request_log_fields(&ctx, &req, 0, false));
 
     Ok((StatusCode::OK.into_response(), ctx, req))
 }
@@ -261,7 +261,7 @@ async fn http_plain_proxy(ctx: ProxyContext, req: Request) -> Result<Response, I
         debug!(uri = %cache_key, "cache hit");
         log_request_fields(
             &ctx,
-            RequestLogFields {
+            &RequestLogFields {
                 response_bytes,
                 cached: true,
                 ..request_log
@@ -276,7 +276,7 @@ async fn http_plain_proxy(ctx: ProxyContext, req: Request) -> Result<Response, I
         Ok(resp) => cache_and_tag_response(ctx, method, cache_key, request_log, resp).await,
         Err(err) => {
             error!(error = %err, "error in upstream request");
-            log_request_fields(&ctx, request_log);
+            log_request_fields(&ctx, &request_log);
             Ok(empty_response(StatusCode::INTERNAL_SERVER_ERROR))
         }
     }
@@ -322,7 +322,7 @@ async fn cache_and_tag_response(
 
     set_cache_header(&mut parts.headers, "miss");
 
-    log_request_fields(&ctx, request_log);
+    log_request_fields(&ctx, &request_log);
 
     Ok(Response::from_parts(parts, Body::from(body_bytes)))
 }
@@ -347,7 +347,7 @@ fn request_log_fields(
     }
 }
 
-fn log_request_fields(ctx: &ProxyContext, fields: RequestLogFields) {
+fn log_request_fields(ctx: &ProxyContext, fields: &RequestLogFields) {
     if let Some(tx_bytes) = ctx.state().datastore.metrics.as_ref().map(|m| &m.tx_bytes) {
         tx_bytes.add(
             fields.response_bytes as u64,

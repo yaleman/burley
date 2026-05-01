@@ -1,3 +1,15 @@
+#![deny(warnings)]
+#![warn(unused_extern_crates)]
+#![deny(clippy::todo)]
+#![deny(clippy::unimplemented)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
+#![deny(clippy::await_holding_lock)]
+#![deny(clippy::needless_pass_by_value)]
+#![deny(clippy::trivially_copy_pass_by_ref)]
+#![deny(clippy::unreachable)]
+
 use chrono::{DateTime, Utc};
 use rama::http::{HeaderMap, Method, StatusCode, header};
 use std::{collections::HashMap, path::PathBuf, sync::RwLock};
@@ -34,8 +46,11 @@ impl DataStore {
             metrics: None,
         }
     }
-    pub fn with_metrics(self, metrics_meter: opentelemetry_sdk::metrics::SdkMeterProvider) -> Self {
-        let metrics = Some(crate::stats::init_meters(&metrics_meter));
+    pub fn with_metrics(
+        self,
+        metrics_meter: &opentelemetry_sdk::metrics::SdkMeterProvider,
+    ) -> Self {
+        let metrics = Some(crate::stats::init_meters(metrics_meter));
         Self { metrics, ..self }
     }
 

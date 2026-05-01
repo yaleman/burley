@@ -1,0 +1,18 @@
+# default is 7, 8's ok. https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+too-many-arguments-threshold = 8
+
+# default's 250
+type-complexity-threshold = 300
+
+disallowed-types = []
+
+disallowed-methods = [
+    # { path = "time::OffsetDateTime::now_utc", reason = "Time is a function parameter so that we can control it during testing." },
+    { path = "std::thread::sleep", reason = "Sleeping should not be used in tests as time is a controlled parameter. Additionally, sleeping can block async threads from proceeding." },
+]
+
+allow-expect-in-tests = true
+allow-unwrap-in-tests = false
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+allow-indexing-slicing-in-tests = true
