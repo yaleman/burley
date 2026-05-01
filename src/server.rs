@@ -2,6 +2,7 @@
 
 use crate::{CacheEntry, DataStore, cli::Cli, error::BurleyError, is_cacheable_response};
 use chrono::Utc;
+use opentelemetry::KeyValue;
 use rama::{
     Context, Layer, Service,
     error::{ErrorContext, OpaqueError},
@@ -38,7 +39,7 @@ use rama::{
 use serde_with::{DisplayFromStr, serde_as};
 use std::{convert::Infallible, io::BufReader, path::Path, sync::Arc};
 use tempfile::tempdir;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 const BODY_LIMIT: usize = 1024 * 1024 * 1024;
 const CACHE_MAX_SIZE: usize = 1024 * 1024 * 20;
@@ -62,12 +63,16 @@ struct RequestLogFields {
     url: Uri,
     response_bytes: usize,
     http_version: String,
+    cached: bool,
 }
 
 pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
     let tls_config = match (&cli.tls_cert, &cli.tls_key) {
         (Some(cert), Some(key)) => Some(load_tls_acceptor_data(cert, key).await?),
-        (None, None) => None,
+        (None, None) => {
+            warn!("TLS cert and key not provided, HTTPS proxy will be disabled");
+            None
+        }
         _ => {
             return Err(BurleyError::Other(
                 "TLS cert and key must be provided together".to_owned(),
@@ -75,12 +80,18 @@ pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
         }
     };
 
+    let metrics_provider = crate::stats::init();
+
     let store_dir = tempdir()?;
+    info!(
+        "Using temporary directory {} for cache storage",
+        store_dir.path().display()
+    );
     let state = ProxyState {
-        datastore: Arc::new(DataStore::new(
-            CACHE_MAX_SIZE as u64,
-            store_dir.path().to_path_buf(),
-        )),
+        datastore: Arc::new(
+            DataStore::new(CACHE_MAX_SIZE as u64, store_dir.path().to_path_buf())
+                .with_metrics(metrics_provider.clone()),
+        ),
     };
 
     let http_addr = format!("127.0.0.1:{}", cli.http_port);
@@ -104,31 +115,9 @@ pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
 
     let exec = Executor::new();
 
-    // graceful.spawn_task_fn(async move |guard| {
-    //     let exec = Executor::graceful(guard.clone());
-    let http_service = HttpServer::auto(exec).service(
-        (
-            TraceLayer::new_for_http(),
-            UpgradeLayer::new(
-                MethodMatcher::CONNECT,
-                service_fn(http_connect_accept),
-                service_fn(http_connect_proxy),
-            ),
-            RemoveResponseHeaderLayer::hop_by_hop(),
-            RemoveRequestHeaderLayer::hop_by_hop(),
-        )
-            .into_layer(service_fn(http_plain_proxy)),
-    );
-    info!(addr = %http_addr, "starting HTTP proxy listener");
-    http_listener
-        .serve(BodyLimitLayer::symmetric(BODY_LIMIT).into_layer(http_service))
-        .await;
-    // });
-
-    if let (Some((https_listener, https_addr)), Some(tls_config)) = (https_listener, tls_config) {
-        //     graceful.spawn_task_fn(async move |guard| {
-        let exec = Executor::new();
-        //         let exec = Executor::graceful(guard.clone());
+    // graceful.spawn_task_fn(async move |guardian| {
+    //     let exec = Executor::graceful(guardian.clone());
+    let http = tokio::spawn(async move {
         let http_service = HttpServer::auto(exec).service(
             (
                 TraceLayer::new_for_http(),
@@ -142,20 +131,73 @@ pub async fn run_server(cli: Cli) -> Result<(), BurleyError> {
             )
                 .into_layer(service_fn(http_plain_proxy)),
         );
-        info!(addr = %https_addr, "starting HTTPS proxy listener");
-        https_listener
-            .serve(
-                // guard,
-                (
-                    BodyLimitLayer::symmetric(BODY_LIMIT),
-                    TlsAcceptorLayer::new(tls_config).with_store_client_hello(true),
-                )
-                    .into_layer(http_service),
-            )
+        info!(addr = %http_addr, "Starting HTTP proxy listener");
+        http_listener
+            .serve(BodyLimitLayer::symmetric(BODY_LIMIT).into_layer(http_service))
             .await;
-        // });
-    }
+    });
+    // });
 
+    let https = if let (Some((https_listener, https_addr)), Some(tls_config)) =
+        (https_listener, tls_config)
+    {
+        Some(tokio::spawn(async move {
+            //     graceful.spawn_task_fn(async move |guardian| {
+            let exec = Executor::new();
+            //         let exec = Executor::graceful(guard.clone());
+            let http_service = HttpServer::auto(exec).service(
+                (
+                    TraceLayer::new_for_http(),
+                    UpgradeLayer::new(
+                        MethodMatcher::CONNECT,
+                        service_fn(http_connect_accept),
+                        service_fn(http_connect_proxy),
+                    ),
+                    RemoveResponseHeaderLayer::hop_by_hop(),
+                    RemoveRequestHeaderLayer::hop_by_hop(),
+                )
+                    .into_layer(service_fn(http_plain_proxy)),
+            );
+            info!(addr = %https_addr, "Starting HTTPS proxy listener");
+            https_listener
+                .serve(
+                    // guard,
+                    (
+                        BodyLimitLayer::symmetric(BODY_LIMIT),
+                        TlsAcceptorLayer::new(tls_config).with_store_client_hello(true),
+                    )
+                        .into_layer(http_service),
+                )
+                .await;
+        }))
+    } else {
+        None
+    };
+
+    tokio::select! {
+        Err(err) = http => {
+            error!(error = %err, "HTTP listener task failed");
+        }
+        Some(err) = async move {
+            if let Some(https) = https {
+                https.await.ok()
+            } else {
+                None
+            }
+        } => {
+            error!(error = ?err, "HTTPS listener task failed");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received Ctrl+C, shutting down");
+        }
+    }
+    // _ = graceful.wait_for_shutdown() => {
+    //     info!("Graceful shutdown complete");
+    // }
+
+    if let Err(err) = metrics_provider.shutdown() {
+        error!(error = %err, "error shutting down metrics provider");
+    }
     // graceful
     //     .shutdown_with_limit(Duration::from_secs(30))
     //     .await
@@ -176,7 +218,7 @@ async fn http_connect_accept(
         }
     }
 
-    log_request_fields(request_log_fields(&ctx, &req, 0));
+    log_request_fields(&ctx, request_log_fields(&ctx, &req, 0, false));
 
     Ok((StatusCode::OK.into_response(), ctx, req))
 }
@@ -209,18 +251,24 @@ async fn http_connect_proxy(ctx: ProxyContext, mut upgraded: Upgraded) -> Result
 async fn http_plain_proxy(ctx: ProxyContext, req: Request) -> Result<Response, Infallible> {
     let method = req.method().clone();
     let cache_key = req.uri().to_string();
-    let request_log = request_log_fields(&ctx, &req, 0);
+    let request_log = request_log_fields(&ctx, &req, 0, false);
 
     if method == Method::GET
         && let Some(entry) = ctx.state().datastore.get(&cache_key)
+    // TODO handle object expiry
     {
         let response_bytes = entry.content.len();
         debug!(uri = %cache_key, "cache hit");
-        log_request_fields(RequestLogFields {
-            response_bytes,
-            ..request_log
-        });
-        return Ok(response_from_cache(entry));
+        log_request_fields(
+            &ctx,
+            RequestLogFields {
+                response_bytes,
+                cached: true,
+                ..request_log
+            },
+        );
+
+        return Ok(serve_cache_response(entry));
     }
 
     let client = EasyHttpWebClient::default();
@@ -228,7 +276,7 @@ async fn http_plain_proxy(ctx: ProxyContext, req: Request) -> Result<Response, I
         Ok(resp) => cache_and_tag_response(ctx, method, cache_key, request_log, resp).await,
         Err(err) => {
             error!(error = %err, "error in upstream request");
-            log_request_fields(request_log);
+            log_request_fields(&ctx, request_log);
             Ok(empty_response(StatusCode::INTERNAL_SERVER_ERROR))
         }
     }
@@ -273,7 +321,8 @@ async fn cache_and_tag_response(
     }
 
     set_cache_header(&mut parts.headers, "miss");
-    log_request_fields(request_log);
+
+    log_request_fields(&ctx, request_log);
 
     Ok(Response::from_parts(parts, Body::from(body_bytes)))
 }
@@ -282,6 +331,7 @@ fn request_log_fields(
     ctx: &ProxyContext,
     req: &Request,
     response_bytes: usize,
+    cached: bool,
 ) -> RequestLogFields {
     RequestLogFields {
         method: req.method().clone(),
@@ -293,14 +343,24 @@ fn request_log_fields(
         url: req.uri().clone(),
         response_bytes,
         http_version: format!("{:?}", req.version()),
+        cached,
     }
 }
 
-fn log_request_fields(fields: RequestLogFields) {
+fn log_request_fields(ctx: &ProxyContext, fields: RequestLogFields) {
+    if let Some(tx_bytes) = ctx.state().datastore.metrics.as_ref().map(|m| &m.tx_bytes) {
+        tx_bytes.add(
+            fields.response_bytes as u64,
+            &[
+                KeyValue::new("cached", fields.cached.to_string()),
+                KeyValue::new("http_method", fields.method.clone().to_string()),
+            ],
+        );
+    }
     info!("{}", serde_json::json!(fields));
 }
 
-fn response_from_cache(entry: CacheEntry) -> Response {
+fn serve_cache_response(entry: CacheEntry) -> Response {
     let mut response = Response::new(Body::from(entry.content));
     *response.status_mut() = entry.status;
     *response.headers_mut() = entry.headers;
@@ -463,7 +523,7 @@ mod tests {
             .body(Body::empty())
             .expect("build request");
 
-        let log = request_log_fields(&ctx, &req, 512);
+        let log = request_log_fields(&ctx, &req, 512, false);
 
         assert_eq!(log.method, Method::POST);
         assert_eq!(log.client_ip, "203.0.113.7");

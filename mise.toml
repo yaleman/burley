@@ -1,11 +1,13 @@
 [tasks.check]
-depends = ["fmt", "clippy", "test"]
+depends = ["clippy", "test"]
 
 [tasks.fmt]
 run = "cargo fmt --all"
 
 [tasks.clippy]
+depends = ["fmt"]
 run = "cargo clippy --all -- -D warnings"
 
 [tasks.test]
+depends = ["fmt"]
 run = "cargo test --all"

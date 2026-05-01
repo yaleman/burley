@@ -2,9 +2,13 @@ use chrono::{DateTime, Utc};
 use rama::http::{HeaderMap, Method, StatusCode, header};
 use std::{collections::HashMap, path::PathBuf, sync::RwLock};
 
+use crate::stats::StatsMeters;
+
 pub mod cli;
 pub mod error;
+pub mod logging;
 pub mod server;
+pub mod stats;
 
 #[derive(Clone, Debug)]
 pub struct CacheEntry {
@@ -18,6 +22,7 @@ pub struct DataStore {
     pub max_store_size: u64,
     pub urls: RwLock<HashMap<String, CacheEntry>>,
     pub store: PathBuf,
+    pub metrics: Option<StatsMeters>,
 }
 
 impl DataStore {
@@ -26,7 +31,12 @@ impl DataStore {
             max_store_size,
             urls: RwLock::new(HashMap::new()),
             store,
+            metrics: None,
         }
+    }
+    pub fn with_metrics(self, metrics_meter: opentelemetry_sdk::metrics::SdkMeterProvider) -> Self {
+        let metrics = Some(crate::stats::init_meters(&metrics_meter));
+        Self { metrics, ..self }
     }
 
     pub fn get(&self, url: &str) -> Option<CacheEntry> {
@@ -35,6 +45,13 @@ impl DataStore {
     }
 
     pub fn insert(&self, url: String, entry: CacheEntry) {
+        self.metrics.as_ref().map(|metrics| {
+            let urls = self.urls.read().ok()?;
+            let total_size: u64 = urls.values().map(|entry| entry.content.len() as u64).sum();
+            metrics.cache_size.record(total_size, &[]);
+            Some(())
+        });
+
         if let Ok(mut urls) = self.urls.write() {
             urls.insert(url, entry);
         }
@@ -87,6 +104,29 @@ mod tests {
             &headers,
             128,
             1024
+        ));
+    }
+
+    #[test]
+    fn non_ok_status_is_not_cacheable() {
+        let headers = HeaderMap::new();
+        assert!(!is_cacheable_response(
+            &Method::GET,
+            StatusCode::HTTP_VERSION_NOT_SUPPORTED,
+            &headers,
+            128,
+            1024
+        ));
+    }
+    #[test]
+    fn massive_body_is_not_cacheable() {
+        let headers = HeaderMap::new();
+        assert!(!is_cacheable_response(
+            &Method::GET,
+            StatusCode::HTTP_VERSION_NOT_SUPPORTED,
+            &headers,
+            1024,
+            128,
         ));
     }
 

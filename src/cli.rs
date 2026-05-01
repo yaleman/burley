@@ -15,4 +15,7 @@ pub struct Cli {
 
     #[clap(short, long, env = "BURLEY_DEBUG")]
     pub debug: bool,
+
+    #[clap(long, short, help = "Tokio console mode")]
+    pub tokio_console: bool,
 }

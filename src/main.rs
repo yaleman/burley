@@ -1,23 +1,13 @@
 use clap::Parser;
+use std::process::ExitCode;
 use tracing::{debug, error, info};
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     let cli = burley::cli::Cli::parse();
-
-    let env_filter = match EnvFilter::try_from_default_env() {
-        Ok(filter) => filter,
-        Err(_) => EnvFilter::new("info"),
+    if let Err(err) = burley::logging::init_logging(&cli) {
+        return err;
     };
-    if let Err(err) = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(cli.debug)
-        .try_init()
-    {
-        eprintln!("Failed to initialize logging: {err}");
-        std::process::exit(1);
-    }
 
     info!(
         "Starting Burley on HTTP port {} and HTTPS port {}",
@@ -87,4 +77,5 @@ async fn main() {
         }
     }
     info!("Shutting down...");
+    ExitCode::SUCCESS
 }
